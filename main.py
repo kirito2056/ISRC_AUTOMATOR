@@ -157,8 +157,8 @@ def main():
         albums = find_approved_albums(driver)
         if albums:
             # 가장 첫 번째 (최신) 앨범의 상세 페이지로 이동
-            latest_album_code = albums[0]["code"]
-            latest_album_title = albums[0]["title"]
+            latest_album_code = albums[1]["code"]
+            latest_album_title = albums[1]["title"]
             album_url = f"https://www.mims.or.kr/mypage/view/album/{latest_album_code}"
             
             print(f"\n가장 최신 앨범 '{latest_album_title}'의 상세 페이지로 이동합니다.")
