@@ -46,13 +46,61 @@ def goto_album_register(driver) -> bool:
                 EC.presence_of_element_located((By.CSS_SELECTOR, "form, input, select, textarea"))
             )
         except Exception:
-            # 폼 요소를 못 찾더라도 URL 기준으로 앨범등록 진입으로 간주
             pass
 
         print("앨범등록 페이지 진입 완료!")
+
+        # 대량등록(엑셀) 버튼 클릭 및 패널 오픈 대기
+        bulk_btn = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "register-excel-btn"))
+        )
+        bulk_btn.click()
+        excel_card = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "excel-card"))
+        )
+        WebDriverWait(driver, 10).until(lambda d: 'd-none' not in excel_card.get_attribute('class'))
+        print("대량등록(엑셀) 패널 열기 완료!")
+
+        # 숨겨진 파일 입력을 찾아 노출 후, 지정 파일 선택(send_keys)
+        file_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "mims-excel-upload"))
+        )
+
+        # 절대 경로 생성 (현재 작업 디렉토리 기준)
+        excel_filename = "박성태 - 기도왕｜MIMS.xlsx"
+        excel_path = os.path.abspath(os.path.join(os.getcwd(), excel_filename))
+        if not os.path.exists(excel_path):
+            raise FileNotFoundError(f"엑셀 파일을 찾을 수 없습니다: {excel_path}")
+
+        # display:none 회피: 입력을 보이도록 만들고 값 전송
+        driver.execute_script(
+            "arguments[0].classList.remove('d-none'); arguments[0].style.display='block';",
+            file_input,
+        )
+        file_input.send_keys(excel_path)
+        print(f"파일 선택 완료: {excel_path}")
+
+        # 큐에 행이 나타날 때까지 대기 (업로드 준비됨)
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#excel-card tbody tr"))
+        )
+
+        # 업로드 버튼 클릭 (fa-upload 아이콘 포함 버튼)
+        upload_btn = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, "//div[@id='excel-card']//button[.//span[contains(@class,'fa-upload')]]"))
+        )
+        upload_btn.click()
+        print("업로드 버튼 클릭 완료. 업로드 진행 대기...")
+
+        # 업로드 성공 배지 등장 대기
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#excel-card .badge-success"))
+        )
+        print("업로드 완료 감지!")
+
         return True
     except Exception as e:
-        print(f"앨범등록 페이지 진입 실패: {e}")
+        print(f"앨범등록 페이지/업로드 흐름 실패: {e}")
         return False
 
 
