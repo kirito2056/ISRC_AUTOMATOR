@@ -1,4 +1,5 @@
 import os
+import time
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -6,6 +7,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
 LOGIN_URL = "https://www.mims.or.kr/login"
 ALBUM_REGISTER_URL = "https://www.mims.or.kr/mypage/meta"
@@ -92,15 +94,63 @@ def goto_album_register(driver) -> bool:
         upload_btn.click()
         print("업로드 버튼 클릭 완료. 업로드 진행 대기...")
 
-        # 업로드 성공 배지 등장 대기
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#excel-card .badge-success"))
+        # 업로드 직후 경고(alert) 발생 가능성 처리
+        try:
+            WebDriverWait(driver, 5).until(EC.alert_is_present())
+            alert = driver.switch_to.alert
+            print(f"업로드 경고창 감지: {alert.text}")
+            alert.accept()
+            print("경고창 확인(accept) 완료")
+        except TimeoutException:
+            pass
+
+        # 업로드 성공 배지 등장 대기(없으면 계속 진행)
+        try:
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#excel-card .badge-success"))
+            )
+            print("업로드 완료 감지!")
+        except TimeoutException:
+            print("업로드 성공 배지를 확인하지 못했지만 다음 단계로 진행합니다.")
+
+        # 업로드 완료 후 목록 새로고침 버튼 클릭 (검색하기)
+        try:
+            search_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "search-btn"))
+            )
+            search_btn.click()
+        except Exception:
+            pass
+
+        # 최신 항목(1행) 앨범명 링크 클릭 (파일명 정규화 불필요)
+        table_first_album_xpath = "//div[@id='table']//table//tbody/tr[1]/td[3]/a[contains(@class,'go-register')]"
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH, table_first_album_xpath))
         )
-        print("업로드 완료 감지!")
+        # StaleElementReferenceException 대비 재시도 클릭
+        last_err = None
+        for attempt in range(5):
+            try:
+                first_album_link = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, table_first_album_xpath))
+                )
+                first_album_text = first_album_link.text
+                first_album_link.click()
+                print(f"상세등록 페이지로 이동 중... (앨범명: {first_album_text})")
+                break
+            except StaleElementReferenceException as e:
+                last_err = e
+                time.sleep(0.5)
+                continue
+        else:
+            raise last_err if last_err else Exception("첫 행 앨범 링크 클릭 실패")
+
+        WebDriverWait(driver, 20).until(EC.url_contains("/mypage/meta/register/"))
+        print("상세등록 페이지 진입 완료!")
 
         return True
     except Exception as e:
-        print(f"앨범등록 페이지/업로드 흐름 실패: {e}")
+        print(f"앨범등록 페이지/업로드/상세 진입 흐름 실패: {e}")
         return False
 
 
