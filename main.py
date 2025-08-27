@@ -7,7 +7,9 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, UnexpectedAlertPresentException
+from selenium.webdriver.common.keys import Keys
+import traceback
 
 def login(driver, mims_id, mims_password):
     driver.get("https://www.mims.or.kr/login")
@@ -93,56 +95,148 @@ def issue_codes(driver):
         except Exception:
             return None
 
+    def _count_rows(driver):
+        try:
+            track_list_xpath = "//th[contains(text(), 'ISRC/Music.UCI')]/ancestor::table/tbody/tr"
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.XPATH, track_list_xpath)))
+            return len(driver.find_elements(By.XPATH, track_list_xpath))
+        except Exception:
+            return 0
+
+    def _wait_for_isrc_applied(driver, expected_rows):
+        # 우선 하나 이상 나타날 때까지 대기
+        WebDriverWait(driver, 30).until(
+            lambda d: len(d.find_elements(By.CSS_SELECTOR, "span.g-bg-darkred[data-clipboard-data]")) >= 1
+        )
+        # 가능하면 전체 행 수만큼 채워질 때까지 추가 대기 (최대 20초)
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "span.g-bg-darkred[data-clipboard-data]")) >= expected_rows
+            )
+        except TimeoutException:
+            pass
+
+    def _wait_for_uci_applied(driver, expected_rows):
+        WebDriverWait(driver, 30).until(
+            lambda d: len(d.find_elements(By.CSS_SELECTOR, "span.g-bg-blue[data-clipboard-data]")) >= 1
+        )
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: len(d.find_elements(By.CSS_SELECTOR, "span.g-bg-blue[data-clipboard-data]")) >= expected_rows
+            )
+        except TimeoutException:
+            pass
+
+    def _count_isrc_applied(driver):
+        return len(driver.find_elements(By.CSS_SELECTOR, "span.g-bg-darkred[data-clipboard-data]"))
+
+    def _count_uci_applied(driver):
+        return len(driver.find_elements(By.CSS_SELECTOR, "span.g-bg-blue[data-clipboard-data]"))
+
+    def _accept_all_alerts(driver, label: str, max_tries: int = 5):
+        for i in range(1, max_tries + 1):
+            try:
+                WebDriverWait(driver, 2).until(EC.alert_is_present())
+                alert = driver.switch_to.alert
+                try:
+                    print(f"[{label} ALERT #{i}] {alert.text}")
+                except Exception:
+                    pass
+                alert.accept()
+                time.sleep(0.2)
+            except TimeoutException:
+                break
+            except Exception as e:
+                print(f"[{label} ALERT HANDLER ERROR] {e}")
+                print(traceback.format_exc())
+                break
+
+    def _click_and_accept(driver, by, ident, label):
+        try:
+            btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((by, ident)))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+            driver.execute_script("arguments[0].click();", btn)
+            # 즉시 뜨는 알럿(확인/결과) 모두 수락
+            _accept_all_alerts(driver, label, max_tries=5)
+            print(f"{label} 발급 확인 완료. 페이지 반영 대기...")
+            # 대기 중 발생하는 지연 알럿까지 처리하며 재시도
+            for _ in range(3):
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'ISRC/Music.UCI')]"))
+                    )
+                    break
+                except UnexpectedAlertPresentException:
+                    _accept_all_alerts(driver, label, max_tries=5)
+                except TimeoutException:
+                    # 혹시 늦게 뜬 알럿 있을 수 있어 한 번 더 수락 시도
+                    _accept_all_alerts(driver, label, max_tries=1)
+            return True
+        except NoSuchElementException as e:
+            print(f"{label} 발급 버튼을 찾을 수 없습니다. {e}")
+            print(traceback.format_exc())
+            return False
+        except TimeoutException as e:
+            print(f"{label} 발급 확인창이 나타나지 않았거나 페이지 로딩에 실패했습니다. {e}")
+            print(traceback.format_exc())
+            return False
+
     try:
-        # 이 함수가 호출되기 전에 이미 '수록곡' 섹션이 로드된 것을 보장하므로,
-        # 여기서는 바로 코드 추출을 시도합니다.
-        existing_codes = extract_codes(driver)
-        if existing_codes is not None and existing_codes:
-            print("이미 발급된 코드를 찾았습니다.")
-            return existing_codes
-        
-        print("기존 코드를 찾지 못했습니다. 코드 발급을 시도합니다.")
+        # 수록곡 섹션 로드 및 총 행수 파악
+        total_rows = _count_rows(driver)
+        if total_rows == 0:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'ISRC/Music.UCI')]/ancestor::table/tbody/tr"))
+            )
+            total_rows = _count_rows(driver)
 
-        # --- 자동 발급 기능 주석 해제 ---
-        # Issue ISRC
-        try:
-            isrc_button = driver.find_element(By.ID, "setTrackIsrc")
+        # 1) 현재 적용 상태 파악
+        isrc_applied = _count_isrc_applied(driver)
+        uci_applied = _count_uci_applied(driver)
+        need_isrc = isrc_applied < total_rows
+        need_uci = uci_applied < total_rows
+
+        if not need_isrc and not need_uci:
+            print("ISRC/UCI가 모두 존재합니다. 코드만 추출합니다.")
+            return extract_codes(driver)
+
+        # 2) 필요한 것만 발급
+        did_issue = False
+        if need_isrc:
             print("ISRC 발급 버튼 클릭...")
-            isrc_button.click()
-            WebDriverWait(driver, 10).until(EC.alert_is_present())
-            driver.switch_to.alert.accept()
-            print("ISRC 발급 확인 완료. 페이지 로딩 대기...")
-            # 발급 후 페이지가 완전히 새로고침되고 수록곡 목록이 나타날 때까지 기다립니다.
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'ISRC/Music.UCI')]"))
-            )
-        except NoSuchElementException:
-            print("ISRC 발급 버튼을 찾을 수 없습니다.")
-        except TimeoutException:
-            print("ISRC 발급 확인창이 나타나지 않았거나 페이지 로딩에 실패했습니다.")
+            if _click_and_accept(driver, By.ID, "setTrackIsrc", "ISRC"):
+                _wait_for_isrc_applied(driver, total_rows)
+            did_issue = True
 
-        # Issue UCI
-        try:
-            uci_button = driver.find_element(By.ID, "setTrackUCI")
+        if need_uci:
             print("UCI 발급 버튼 클릭...")
-            uci_button.click()
-            WebDriverWait(driver, 10).until(EC.alert_is_present())
-            driver.switch_to.alert.accept()
-            print("UCI 발급 확인 완료. 페이지 로딩 대기...")
-            # 발급 후 페이지가 완전히 새로고침되고 수록곡 목록이 나타날 때까지 기다립니다.
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'ISRC/Music.UCI')]"))
-            )
-        except NoSuchElementException:
-            print("UCI 발급 버튼을 찾을 수 없습니다.")
-        except TimeoutException:
-            print("UCI 발급 확인창이 나타나지 않았거나 페이지 로딩에 실패했습니다.")
+            if _click_and_accept(driver, By.ID, "setTrackUCI", "UCI"):
+                _wait_for_uci_applied(driver, total_rows)
+            did_issue = True
 
-        print("코드 발급 후 다시 코드 추출을 시도합니다.")
+        # 3) 반영 대기 후 1초 지연 → 새로고침 1회 → 추출 → 마지막에 새로고침 1회 더 → 최종 추출
+        if did_issue:
+            time.sleep(1)
+            driver.refresh()
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'ISRC/Music.UCI')]/ancestor::table/tbody/tr"))
+            )
+            first_codes = extract_codes(driver)
+
+            driver.refresh()
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'ISRC/Music.UCI')]/ancestor::table/tbody/tr"))
+            )
+            print("코드 발급/이중 새로고침 후 최종 코드 추출을 시도합니다.")
+            final_codes = extract_codes(driver)
+            return final_codes or first_codes
+
+        # 발급이 없었으면 즉시 추출
         return extract_codes(driver)
 
     except Exception as e:
         print(f"코드 확인/발급 중 예상치 못한 오류 발생: {e}")
+        print(traceback.format_exc())
         return None
 
 def main():
@@ -157,8 +251,8 @@ def main():
         albums = find_approved_albums(driver)
         if albums:
             # 가장 첫 번째 (최신) 앨범의 상세 페이지로 이동
-            latest_album_code = albums[1]["code"]
-            latest_album_title = albums[1]["title"]
+            latest_album_code = albums[0]["code"]
+            latest_album_title = albums[0]["title"]
             album_url = f"https://www.mims.or.kr/mypage/view/album/{latest_album_code}"
             
             print(f"\n가장 최신 앨범 '{latest_album_title}'의 상세 페이지로 이동합니다.")
