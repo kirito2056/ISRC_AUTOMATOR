@@ -3,3 +3,8 @@
 
 # Virtual environment
 venv/
+312venv/
+*.mp3
+*.npy
+*.pyc
+*.DS_Store
